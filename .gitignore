@@ -1,0 +1,27 @@
+# Build directories
+/build/
+/build-*/
+/cmake-build-*/
+/CMakeFiles/
+CMakeCache.txt
+
+# Visual Studio/IDE
+*.sln
+*.vcxproj*
+*.vcproj*
+*.user
+*.opensdf
+*.sdf
+*.opendb
+*.VC.db
+/.vs/
+
+# JUCE generated
+/JuceLibraryCode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
