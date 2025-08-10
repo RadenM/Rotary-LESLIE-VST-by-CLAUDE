@@ -1,0 +1,157 @@
+# Leslie Rotary VST Plugin - CMakeLists.txt
+cmake_minimum_required(VERSION 3.22)
+
+project(LeslieRotaryVST VERSION 1.0.0)
+
+# C++ Standard
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# JUCE Setup
+find_package(PkgConfig REQUIRED)
+
+# Add JUCE as a subdirectory or find it
+# Option 1: If JUCE is a git submodule in your project
+# add_subdirectory(JUCE)
+
+# Option 2: Find JUCE if it's installed system-wide
+# find_package(JUCE CONFIG REQUIRED)
+
+# Option 3: Download JUCE (recommended for self-contained builds)
+include(FetchContent)
+FetchContent_Declare(
+    JUCE
+    GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
+    GIT_TAG 7.0.9
+)
+FetchContent_MakeAvailable(JUCE)
+
+# Plugin Definition
+juce_add_plugin(LeslieRotaryVST
+    # VERSION ...                               # Set this if the plugin version is different to the project version
+    # ICON_BIG ...                              # ICON_* arguments specify a path to an image file to use as an icon for the Standalone
+    # ICON_SMALL ...
+    COMPANY_NAME "Your Company"                   # Specify the name of the plugin's author
+    IS_SYNTH FALSE                               # Is this a synth or an effect?
+    NEEDS_MIDI_INPUT FALSE                       # Does the plugin need midi input?
+    NEEDS_MIDI_OUTPUT FALSE                      # Does the plugin need midi output?
+    IS_MIDI_EFFECT FALSE                         # Is this plugin a MIDI processor?
+    EDITOR_WANTS_KEYBOARD_FOCUS FALSE           # Does the editor need keyboard focus?
+    COPY_PLUGIN_AFTER_BUILD TRUE                # Should the plugin be installed to a default location after building?
+    PLUGIN_MANUFACTURER_CODE Manu               # A four-character manufacturer id with at least one upper-case character
+    PLUGIN_CODE LsRo                            # A unique four-character plugin id with exactly one upper-case character
+    FORMATS AU VST3 Standalone                  # The formats to build. Other valid formats are: AAX Unity VST AU AUv3
+    PRODUCT_NAME "Leslie Rotary")               # The name of the final executable, which can differ from the target name
+
+# Generate JuceHeader.h
+juce_generate_juce_header(LeslieRotaryVST)
+
+# Source Files
+target_sources(LeslieRotaryVST
+    PRIVATE
+        Source/LeslieRotaryProcessor.h
+        Source/LeslieRotaryProcessor.cpp
+        Source/LeslieRotaryEditor.h  
+        Source/LeslieRotaryEditor.cpp)
+
+# Required JUCE modules
+target_link_libraries(LeslieRotaryVST
+    PRIVATE
+        # AudioPlugin components:
+        juce::juce_audio_utils
+        juce::juce_audio_devices
+        juce::juce_audio_formats
+        juce::juce_audio_processors
+        juce::juce_data_structures
+        juce::juce_dsp
+        juce::juce_events
+        juce::juce_graphics
+        juce::juce_gui_basics
+        juce::juce_gui_extra
+    PUBLIC
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_lto_flags
+        juce::juce_recommended_warning_flags)
+
+# Preprocessor definitions
+target_compile_definitions(LeslieRotaryVST
+    PUBLIC
+        # JUCE_WEB_BROWSER and JUCE_USE_CURL would be on by default, but you might not need them.
+        JUCE_WEB_BROWSER=0  # If you remove this, add `NEEDS_WEB_BROWSER TRUE` to the `juce_add_plugin` call
+        JUCE_USE_CURL=0     # If you remove this, add `NEEDS_CURL TRUE` to the `juce_add_plugin` call
+        JUCE_VST3_CAN_REPLACE_VST2=0
+        JUCE_DISPLAY_SPLASH_SCREEN=0
+        JUCE_REPORT_APP_USAGE=0
+        JUCE_STRICT_REFCOUNTEDPOINTER=1)
+
+# Additional compiler flags for optimization
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(LeslieRotaryVST PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-O3 -march=native>
+        $<$<CXX_COMPILER_ID:MSVC>:/O2 /arch:AVX2>)
+endif()
+
+# Platform-specific settings
+if(WIN32)
+    # Windows specific settings
+    target_compile_definitions(LeslieRotaryVST PRIVATE
+        NOMINMAX=1
+        WIN32_LEAN_AND_MEAN=1)
+elseif(APPLE)
+    # macOS specific settings
+    set_target_properties(LeslieRotaryVST PROPERTIES
+        XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
+        XCODE_ATTRIBUTE_CLANG_LINK_OBJC_RUNTIME NO)
+endif()
+
+# Build configurations
+set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build" FORCE)
+endif()
+
+# Custom target for installing plugin to system directories
+if(APPLE)
+    set(VST3_INSTALL_DIR "~/Library/Audio/Plug-Ins/VST3")
+    set(AU_INSTALL_DIR "~/Library/Audio/Plug-Ins/Components")
+elseif(WIN32)
+    set(VST3_INSTALL_DIR "$ENV{PROGRAMFILES}/Common Files/VST3")
+else()
+    set(VST3_INSTALL_DIR "~/.vst3")
+endif()
+
+# Installation rules
+install(TARGETS LeslieRotaryVST
+    LIBRARY DESTINATION ${VST3_INSTALL_DIR}
+    RUNTIME DESTINATION ${VST3_INSTALL_DIR})
+
+# Development helper - copy to common DAW plugin directories
+add_custom_target(install_plugin
+    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target install
+    COMMENT "Installing plugin to system directories")
+
+# Print build information
+message(STATUS "Leslie Rotary VST Configuration:")
+message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
+message(STATUS "  Plugin Formats: AU VST3 Standalone")
+message(STATUS "  Install Directory (VST3): ${VST3_INSTALL_DIR}")
+
+# Development build options
+option(LESLIE_BUILD_TESTS "Build unit tests" OFF)
+option(LESLIE_ENABLE_PROFILING "Enable performance profiling" OFF)
+
+if(LESLIE_BUILD_TESTS)
+    # Add test framework (e.g., Catch2)
+    find_package(Catch2 QUIET)
+    if(Catch2_FOUND)
+        add_subdirectory(Tests)
+    else()
+        message(WARNING "Catch2 not found, tests will not be built")
+    endif()
+endif()
+
+if(LESLIE_ENABLE_PROFILING)
+    target_compile_definitions(LeslieRotaryVST PRIVATE LESLIE_ENABLE_PROFILING=1)
+endif()

@@ -1,0 +1,415 @@
+//==============================================================================
+// Leslie Rotary VST Plugin - Implementation
+//==============================================================================
+
+#include "LeslieRotaryProcessor.h"
+
+//==============================================================================
+// RotaryEngine Implementation
+//==============================================================================
+RotaryEngine::RotaryEngine()
+{
+    // Initialize LFOs for rotor simulation
+    hornLFO.initialise([](float x) { return std::sin(x); });
+    drumLFO.initialise([](float x) { return std::sin(x); });
+}
+
+RotaryEngine::~RotaryEngine() {}
+
+void RotaryEngine::prepare(const juce::dsp::ProcessSpec& spec)
+{
+    sampleRate = spec.sampleRate;
+    
+    hornLFO.prepare(spec);
+    drumLFO.prepare(spec);
+    
+    // Set initial frequencies
+    hornLFO.setFrequency(currentHornSpeed);
+    drumLFO.setFrequency(currentDrumSpeed);
+    
+    reset();
+}
+
+void RotaryEngine::reset()
+{
+    hornAngle = 0.0f;
+    drumAngle = 0.0f;
+    rampProgress = 1.0f;
+    
+    hornLFO.reset();
+    drumLFO.reset();
+}
+
+void RotaryEngine::processBlock(juce::AudioBuffer<float>& buffer)
+{
+    const int numSamples = buffer.getNumSamples();
+    const int numChannels = buffer.getNumChannels();
+    
+    if (numSamples == 0 || numChannels == 0)
+        return;
+        
+    // Update speed ramping
+    processSpeedRamping();
+    
+    // Update LFO frequencies
+    hornLFO.setFrequency(currentHornSpeed);
+    drumLFO.setFrequency(currentDrumSpeed);
+    
+    // Process rotary modulation
+    processRotaryModulation(buffer);
+    
+    // Apply stereo spread
+    if (numChannels >= 2)
+        applyStereoSpread(buffer);
+}
+
+void RotaryEngine::updateTargetSpeeds()
+{
+    int state = speedState.load();
+    
+    switch (state)
+    {
+        case 0: // Slow
+            targetHornSpeed = hornSpeedSlow.load();
+            targetDrumSpeed = drumSpeedSlow.load();
+            break;
+        case 1: // Fast  
+            targetHornSpeed = hornSpeedFast.load();
+            targetDrumSpeed = drumSpeedFast.load();
+            break;
+        case 2: // Brake
+            targetHornSpeed = 0.0f;
+            targetDrumSpeed = 0.0f;
+            break;
+    }
+}
+
+void RotaryEngine::processSpeedRamping()
+{
+    updateTargetSpeeds();
+    
+    // Check if we need to start ramping
+    const float speedTolerance = 0.01f;
+    if (std::abs(currentHornSpeed - targetHornSpeed) > speedTolerance ||
+        std::abs(currentDrumSpeed - targetDrumSpeed) > speedTolerance)
+    {
+        if (rampProgress >= 1.0f)
+        {
+            // Start new ramp
+            rampProgress = 0.0f;
+            
+            // Determine ramp direction and time
+            bool isSpeedingUp = (targetHornSpeed > currentHornSpeed) || 
+                               (targetDrumSpeed > currentDrumSpeed);
+            rampDirection = isSpeedingUp ? 1.0f : -1.0f;
+        }
+    }
+    
+    // Process ramping
+    if (rampProgress < 1.0f)
+    {
+        float rampTime = (rampDirection > 0) ? rampTimeUp.load() : rampTimeDown.load();
+        float rampIncrement = 1.0f / (rampTime * sampleRate);
+        
+        rampProgress = juce::jmin(1.0f, rampProgress + rampIncrement);
+        
+        // Apply smooth curve (could be made selectable)
+        float smoothProgress = 0.5f * (1.0f - std::cos(rampProgress * juce::MathConstants<float>::pi));
+        
+        // Interpolate speeds
+        currentHornSpeed = currentHornSpeed + smoothProgress * (targetHornSpeed - currentHornSpeed);
+        currentDrumSpeed = currentDrumSpeed + smoothProgress * (targetDrumSpeed - currentDrumSpeed);
+    }
+}
+
+void RotaryEngine::processRotaryModulation(juce::AudioBuffer<float>& buffer)
+{
+    const int numSamples = buffer.getNumSamples();
+    const int numChannels = buffer.getNumChannels();
+    
+    // Get modulation values
+    float dopplerAmount = dopplerDepth.load() * 0.002f; // Max ±0.2% pitch modulation
+    float amAmount = amDepth.load() * 0.5f; // Max ±50% amplitude modulation
+    
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        // Get LFO values
+        float hornLFOValue = hornLFO.processSample(0.0f);
+        float drumLFOValue = drumLFO.processSample(0.0f);
+        
+        // Update rotor angles for UI feedback
+        hornAngle += (currentHornSpeed * 2.0f * juce::MathConstants<float>::pi) / sampleRate;
+        drumAngle += (currentDrumSpeed * 2.0f * juce::MathConstants<float>::pi) / sampleRate;
+        
+        if (hornAngle > 2.0f * juce::MathConstants<float>::pi) hornAngle -= 2.0f * juce::MathConstants<float>::pi;
+        if (drumAngle > 2.0f * juce::MathConstants<float>::pi) drumAngle -= 2.0f * juce::MathConstants<float>::pi;
+        
+        // Handle brake mode - lock to specific angle
+        if (speedState.load() == 2)
+        {
+            float targetAngle = brakeAngle.load() * juce::MathConstants<float>::pi / 180.0f;
+            hornAngle = targetAngle;
+            drumAngle = targetAngle;
+            hornLFOValue = std::sin(targetAngle);
+            drumLFOValue = std::sin(targetAngle);
+        }
+        
+        // Calculate modulation amounts for horn and drum
+        float hornDoppler = hornLFOValue * dopplerAmount;
+        float drumDoppler = drumLFOValue * dopplerAmount;
+        float hornAM = 1.0f + (hornLFOValue * amAmount * 0.5f);
+        float drumAM = 1.0f + (drumLFOValue * amAmount * 0.5f);
+        
+        // Apply modulation to all channels
+        for (int channel = 0; channel < numChannels; ++channel)
+        {
+            float* channelData = buffer.getWritePointer(channel);
+            float inputSample = channelData[sample];
+            
+            // Simple crossover simulation - horn gets highs, drum gets lows
+            // This is a simplified approach; real implementation would use proper filters
+            float hornSample = inputSample * 0.7f; // Simulate high-pass
+            float drumSample = inputSample * 0.8f; // Simulate low-pass
+            
+            // Apply Doppler (pitch modulation) - simplified as gain modulation for now
+            hornSample *= (1.0f + hornDoppler);
+            drumSample *= (1.0f + drumDoppler);
+            
+            // Apply amplitude modulation
+            hornSample *= hornAM;
+            drumSample *= drumAM;
+            
+            // Mix horn and drum back together
+            float balance = hornDrumBalance.load();
+            channelData[sample] = (hornSample * balance) + (drumSample * (1.0f - balance));
+        }
+    }
+}
+
+void RotaryEngine::applyStereoSpread(juce::AudioBuffer<float>& buffer)
+{
+    const int numSamples = buffer.getNumSamples();
+    float spread = stereoSpread.load();
+    
+    if (spread == 1.0f || buffer.getNumChannels() < 2)
+        return;
+        
+    float* leftChannel = buffer.getWritePointer(0);
+    float* rightChannel = buffer.getWritePointer(1);
+    
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        float mid = (leftChannel[sample] + rightChannel[sample]) * 0.5f;
+        float side = (leftChannel[sample] - rightChannel[sample]) * 0.5f * spread;
+        
+        leftChannel[sample] = mid + side;
+        rightChannel[sample] = mid - side;
+    }
+}
+
+//==============================================================================
+// Parameter setters
+//==============================================================================
+void RotaryEngine::setHornSpeed(float slowHz, float fastHz)
+{
+    hornSpeedSlow.store(juce::jlimit(0.1f, 6.0f, slowHz));
+    hornSpeedFast.store(juce::jlimit(1.0f, 15.0f, fastHz));
+}
+
+void RotaryEngine::setDrumSpeed(float slowHz, float fastHz)
+{
+    drumSpeedSlow.store(juce::jlimit(0.1f, 3.0f, slowHz));
+    drumSpeedFast.store(juce::jlimit(0.5f, 10.0f, fastHz));
+}
+
+void RotaryEngine::setRampTime(float upTime, float downTime)
+{
+    rampTimeUp.store(juce::jlimit(0.015f, 10.0f, upTime));
+    rampTimeDown.store(juce::jlimit(0.015f, 10.0f, downTime));
+}
+
+void RotaryEngine::setSpeedState(int state)
+{
+    speedState.store(juce::jlimit(0, 2, state));
+}
+
+void RotaryEngine::setBrakeAngle(float angle)
+{
+    brakeAngle.store(std::fmod(angle, 360.0f));
+}
+
+void RotaryEngine::setDopplerDepth(float depth)
+{
+    dopplerDepth.store(juce::jlimit(0.0f, 2.0f, depth));
+}
+
+void RotaryEngine::setAmplitudeDepth(float depth)
+{
+    amDepth.store(juce::jlimit(0.0f, 2.0f, depth));
+}
+
+void RotaryEngine::setStereoSpread(float spread)
+{
+    stereoSpread.store(juce::jlimit(0.0f, 2.0f, spread));
+}
+
+//==============================================================================
+// Main Processor Implementation
+//==============================================================================
+LeslieRotaryProcessor::LeslieRotaryProcessor()
+    : AudioProcessor(BusesProperties()
+                       .withInput("Input", juce::AudioChannelSet::stereo(), true)
+                       .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      valueTreeState(*this, nullptr, "PARAMETERS", createParameterLayout())
+{
+    // Add parameter listeners
+    valueTreeState.addParameterListener(RotaryParams::STEREO_SPREAD, this);
+    valueTreeState.addParameterListener(RotaryParams::HORN_DRUM_BALANCE, this);
+}
+
+LeslieRotaryProcessor::~LeslieRotaryProcessor() {}
+
+//==============================================================================
+void LeslieRotaryProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
+{
+    juce::dsp::ProcessSpec spec;
+    spec.sampleRate = sampleRate;
+    spec.maximumBlockSize = samplesPerBlock;
+    spec.numChannels = getTotalNumOutputChannels();
+    
+    rotaryEngine.prepare(spec);
+}
+
+void LeslieRotaryProcessor::releaseResources()
+{
+    rotaryEngine.reset();
+}
+
+bool LeslieRotaryProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
+{
+    // Support mono and stereo
+    if (layouts.getMainOutputChannelSet() == juce::AudioChannelSet::disabled())
+        return false;
+        
+    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
+        && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
+        return false;
+        
+    if (layouts.getMainInputChannelSet() != layouts.getMainOutputChannelSet())
+        return false;
+        
+    return true;
+}
+
+void LeslieRotaryProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+{
+    juce::ScopedNoDenormals noDenormals;
+    
+    auto totalNumInputChannels = getTotalNumInputChannels();
+    auto totalNumOutputChannels = getTotalNumOutputChannels();
+    
+    // Clear any output channels that don't contain input data
+    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+        buffer.clear(i, 0, buffer.getNumSamples());
+        
+    // Process the rotary effect
+    rotaryEngine.processBlock(buffer);
+    
+    // Apply output level
+    float outputLevel = *valueTreeState.getRawParameterValue(RotaryParams::OUTPUT_LEVEL);
+    float outputGain = juce::Decibels::decibelsToGain(outputLevel);
+    
+    if (outputGain != 1.0f)
+    {
+        for (int channel = 0; channel < totalNumOutputChannels; ++channel)
+        {
+            auto* channelData = buffer.getWritePointer(channel);
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+                channelData[sample] *= outputGain;
+        }
+    }
+}
+
+//==============================================================================
+void LeslieRotaryProcessor::parameterChanged(const juce::String& parameterID, float newValue)
+{
+    if (parameterID == RotaryParams::HORN_SPEED_SLOW || parameterID == RotaryParams::HORN_SPEED_FAST)
+    {
+        float slowSpeed = *valueTreeState.getRawParameterValue(RotaryParams::HORN_SPEED_SLOW);
+        float fastSpeed = *valueTreeState.getRawParameterValue(RotaryParams::HORN_SPEED_FAST);
+        rotaryEngine.setHornSpeed(slowSpeed, fastSpeed);
+    }
+    else if (parameterID == RotaryParams::DRUM_SPEED_SLOW || parameterID == RotaryParams::DRUM_SPEED_FAST)
+    {
+        float slowSpeed = *valueTreeState.getRawParameterValue(RotaryParams::DRUM_SPEED_SLOW);
+        float fastSpeed = *valueTreeState.getRawParameterValue(RotaryParams::DRUM_SPEED_FAST);
+        rotaryEngine.setDrumSpeed(slowSpeed, fastSpeed);
+    }
+    else if (parameterID == RotaryParams::RAMP_TIME_UP || parameterID == RotaryParams::RAMP_TIME_DOWN)
+    {
+        float upTime = *valueTreeState.getRawParameterValue(RotaryParams::RAMP_TIME_UP);
+        float downTime = *valueTreeState.getRawParameterValue(RotaryParams::RAMP_TIME_DOWN);
+        rotaryEngine.setRampTime(upTime, downTime);
+    }
+    else if (parameterID == RotaryParams::SPEED_CONTROL)
+    {
+        rotaryEngine.setSpeedState((int)newValue);
+    }
+    else if (parameterID == RotaryParams::BRAKE_ANGLE)
+    {
+        rotaryEngine.setBrakeAngle(newValue);
+    }
+    else if (parameterID == RotaryParams::DOPPLER_DEPTH)
+    {
+        rotaryEngine.setDopplerDepth(newValue);
+    }
+    else if (parameterID == RotaryParams::AM_DEPTH)
+    {
+        rotaryEngine.setAmplitudeDepth(newValue);
+    }
+    else if (parameterID == RotaryParams::STEREO_SPREAD)
+    {
+        rotaryEngine.setStereoSpread(newValue);
+    }
+}
+
+//==============================================================================
+juce::AudioProcessorEditor* LeslieRotaryProcessor::createEditor()
+{
+    return new juce::GenericAudioProcessorEditor(*this);
+}
+
+//==============================================================================
+void LeslieRotaryProcessor::getStateInformation(juce::MemoryBlock& destData)
+{
+    auto state = valueTreeState.copyState();
+    std::unique_ptr<juce::XmlElement> xml(state.createXml());
+    copyXmlToBinary(*xml, destData);
+}
+
+void LeslieRotaryProcessor::setStateInformation(const void* data, int sizeInBytes)
+{
+    std::unique_ptr<juce::XmlElement> xmlState(getXmlFromBinary(data, sizeInBytes));
+    
+    if (xmlState.get() != nullptr)
+        if (xmlState->hasTagName(valueTreeState.state.getType()))
+            valueTreeState.replaceState(juce::ValueTree::fromXml(*xmlState));
+}
+
+//==============================================================================
+// Plugin instantiation
+//==============================================================================
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new LeslieRotaryProcessor();
+}dParameterListener(RotaryParams::HORN_SPEED_SLOW, this);
+    valueTreeState.addParameterListener(RotaryParams::HORN_SPEED_FAST, this);
+    valueTreeState.addParameterListener(RotaryParams::DRUM_SPEED_SLOW, this);
+    valueTreeState.addParameterListener(RotaryParams::DRUM_SPEED_FAST, this);
+    valueTreeState.addParameterListener(RotaryParams::RAMP_TIME_UP, this);
+    valueTreeState.addParameterListener(RotaryParams::RAMP_TIME_DOWN, this);
+    valueTreeState.addParameterListener(RotaryParams::SPEED_CONTROL, this);
+    valueTreeState.addParameterListener(RotaryParams::BRAKE_ANGLE, this);
+    valueTreeState.addParameterListener(RotaryParams::DOPPLER_DEPTH, this);
+    valueTreeState.addParameterListener(RotaryParams::AM_DEPTH, this);
+    valueTreeState.ad

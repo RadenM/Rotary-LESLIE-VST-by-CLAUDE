@@ -1,0 +1,452 @@
+//==============================================================================
+// Phase 2: Enhanced DSP Implementation
+// - Proper crossover filtering
+// - Real Doppler effect using delay lines
+// - Tube-style drive algorithm
+// - Cabinet resonance modeling
+//==============================================================================
+
+#pragma once
+#include <JuceHeader.h>
+#include <array>
+
+//==============================================================================
+// Enhanced Crossover Filter - Linkwitz-Riley 4th order
+//==============================================================================
+class CrossoverFilter
+{
+public:
+    CrossoverFilter() = default;
+    
+    void prepare(const juce::dsp::ProcessSpec& spec)
+    {
+        sampleRate = spec.sampleRate;
+        
+        // Initialize filters - Linkwitz-Riley crossover at ~800Hz
+        highpass.prepare(spec);
+        lowpass.prepare(spec);
+        
+        setCrossoverFrequency(800.0f);
+    }
+    
+    void setCrossoverFrequency(float freq)
+    {
+        crossoverFreq = juce::jlimit(200.0f, 2000.0f, freq);
+        
+        // Linkwitz-Riley: 24dB/octave, two cascaded Butterworth filters
+        auto coeffs_hp = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, crossoverFreq, 0.7071f);
+        auto coeffs_lp = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, crossoverFreq, 0.7071f);
+        
+        *highpass.get<0>().coefficients = *coeffs_hp;
+        *highpass.get<1>().coefficients = *coeffs_hp;
+        *lowpass.get<0>().coefficients = *coeffs_lp;
+        *lowpass.get<1>().coefficients = *coeffs_lp;
+    }
+    
+    void reset()
+    {
+        highpass.reset();
+        lowpass.reset();
+    }
+    
+    struct CrossoverResult
+    {
+        float high, low;
+    };
+    
+    CrossoverResult processSample(float input)
+    {
+        float high = highpass.processSample(input);
+        float low = lowpass.processSample(input);
+        
+        return { high, low };
+    }
+    
+private:
+    double sampleRate = 44100.0;
+    float crossoverFreq = 800.0f;
+    
+    // Two cascaded biquads for each band (Linkwitz-Riley)
+    juce::dsp::ProcessorChain<juce::dsp::IIR::Filter<float>, juce::dsp::IIR::Filter<float>> highpass;
+    juce::dsp::ProcessorChain<juce::dsp::IIR::Filter<float>, juce::dsp::IIR::Filter<float>> lowpass;
+    
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CrossoverFilter)
+};
+
+//==============================================================================
+// Real Doppler Effect using Variable Delay Lines
+//==============================================================================
+class DopplerProcessor
+{
+public:
+    DopplerProcessor() = default;
+    
+    void prepare(const juce::dsp::ProcessSpec& spec)
+    {
+        sampleRate = spec.sampleRate;
+        
+        // Allocate delay buffers - max 10ms delay for realistic Doppler
+        maxDelaySamples = static_cast<int>(sampleRate * 0.01); // 10ms max
+        
+        delayBuffer.setSize(static_cast<int>(spec.numChannels), maxDelaySamples);
+        delayBuffer.clear();
+        
+        writeIndex = 0;
+        
+        // Initialize smoothed delay for artifact-free modulation
+        smoothedDelay.reset(sampleRate, 0.005); // 5ms smoothing
+    }
+    
+    void reset()
+    {
+        delayBuffer.clear();
+        writeIndex = 0;
+        smoothedDelay.reset();
+    }
+    
+    float processSample(float input, float dopplerAmount, int channel = 0)
+    {
+        // Calculate delay in samples based on Doppler amount
+        // dopplerAmount: -1.0 to +1.0 (approaching to receding)
+        float maxDelayMs = 3.0f; // Maximum 3ms delay
+        float targetDelay = (dopplerAmount * maxDelayMs * sampleRate) / 1000.0f;
+        
+        // Smooth the delay to avoid artifacts
+        float currentDelay = smoothedDelay.getNextValue(targetDelay);
+        
+        // Write input to delay buffer
+        delayBuffer.setSample(channel, writeIndex, input);
+        
+        // Calculate read position with fractional delay
+        float readPos = writeIndex - currentDelay;
+        if (readPos < 0.0f) readPos += maxDelaySamples;
+        
+        // Linear interpolation for fractional delay
+        int readIndex1 = static_cast<int>(readPos);
+        int readIndex2 = (readIndex1 + 1) % maxDelaySamples;
+        float fraction = readPos - readIndex1;
+        
+        float sample1 = delayBuffer.getSample(channel, readIndex1);
+        float sample2 = delayBuffer.getSample(channel, readIndex2);
+        
+        float output = sample1 + fraction * (sample2 - sample1);
+        
+        // Advance write index
+        writeIndex = (writeIndex + 1) % maxDelaySamples;
+        
+        return output;
+    }
+    
+private:
+    double sampleRate = 44100.0;
+    juce::AudioBuffer<float> delayBuffer;
+    int maxDelaySamples = 0;
+    int writeIndex = 0;
+    
+    juce::SmoothedValue<float> smoothedDelay;
+    
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DopplerProcessor)
+};
+
+//==============================================================================
+// Tube-Style Drive Algorithm
+//==============================================================================
+class TubeDrive
+{
+public:
+    enum DriveType
+    {
+        Tube = 0,
+        Solid,
+        Fuzz
+    };
+    
+    TubeDrive() = default;
+    
+    void prepare(const juce::dsp::ProcessSpec& spec)
+    {
+        sampleRate = spec.sampleRate;
+        
+        // Pre/post filters for tube character
+        preFilter.prepare(spec);
+        postFilter.prepare(spec);
+        
+        // Pre-emphasis: slight high-mid boost before distortion
+        auto preCoeffs = juce::dsp::IIR::Coefficients<float>::makePeakFilter(
+            sampleRate, 2000.0f, 0.7f, juce::Decibels::decibelsToGain(3.0f));
+        *preFilter.coefficients = *preCoeffs;
+        
+        // Post-filter: slight high-frequency rolloff after distortion
+        auto postCoeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(
+            sampleRate, 8000.0f, 0.7f);
+        *postFilter.coefficients = *postCoeffs;
+        
+        // DC blocker
+        dcBlocker.prepare(spec);
+        dcBlocker.setCutoffFrequency(20.0f);
+    }
+    
+    void reset()
+    {
+        preFilter.reset();
+        postFilter.reset();
+        dcBlocker.reset();
+    }
+    
+    void setDriveType(DriveType type)
+    {
+        driveType = type;
+    }
+    
+    void setDriveAmount(float driveDb)
+    {
+        driveGain = juce::Decibels::decibelsToGain(juce::jlimit(0.0f, 24.0f, driveDb));
+    }
+    
+    float processSample(float input)
+    {
+        // Pre-filtering for character
+        float filtered = preFilter.processSample(input);
+        
+        // Apply drive gain
+        float driven = filtered * driveGain;
+        
+        // Apply saturation based on drive type
+        float saturated = 0.0f;
+        
+        switch (driveType)
+        {
+            case Tube:
+                saturated = processTubeSaturation(driven);
+                break;
+            case Solid:
+                saturated = processSolidStateSaturation(driven);
+                break;
+            case Fuzz:
+                saturated = processFuzzSaturation(driven);
+                break;
+        }
+        
+        // Post-filtering and DC blocking
+        float result = postFilter.processSample(saturated);
+        result = dcBlocker.processSample(result);
+        
+        // Output compensation
+        return result * 0.5f; // Compensate for drive gain
+    }
+    
+private:
+    double sampleRate = 44100.0;
+    DriveType driveType = Tube;
+    float driveGain = 1.0f;
+    
+    juce::dsp::IIR::Filter<float> preFilter, postFilter;
+    juce::dsp::LinkwitzRileyFilter<float> dcBlocker;
+    
+    // Tube saturation - asymmetric soft clipping
+    float processTubeSaturation(float input)
+    {
+        float x = juce::jlimit(-3.0f, 3.0f, input);
+        
+        // Asymmetric tube-like response
+        if (x > 0.0f)
+        {
+            // Positive half - softer clipping
+            return x / (1.0f + 0.3f * x * x);
+        }
+        else
+        {
+            // Negative half - slightly harder clipping
+            return x / (1.0f + 0.4f * x * x);
+        }
+    }
+    
+    // Solid-state saturation - harder, symmetric clipping
+    float processSolidStateSaturation(float input)
+    {
+        float x = juce::jlimit(-2.0f, 2.0f, input);
+        return std::tanh(x * 0.7f);
+    }
+    
+    // Fuzz saturation - hard clipping with some texture
+    float processFuzzSaturation(float input)
+    {
+        float x = input * 1.5f;
+        
+        // Hard clipping with some rounding
+        if (x > 1.0f) return 0.9f + 0.1f * std::tanh(x - 1.0f);
+        if (x < -1.0f) return -0.9f + 0.1f * std::tanh(x + 1.0f);
+        
+        return x;
+    }
+    
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TubeDrive)
+};
+
+//==============================================================================
+// Cabinet Resonance Model - Simple but effective
+//==============================================================================
+class CabinetResonance
+{
+public:
+    CabinetResonance() = default;
+    
+    void prepare(const juce::dsp::ProcessSpec& spec)
+    {
+        sampleRate = spec.sampleRate;
+        
+        // Multiple resonant filters for cabinet character
+        resonantFilters.clear();
+        
+        // Typical Leslie cabinet resonances
+        addResonance(120.0f, 0.8f, 0.3f);  // Low cabinet resonance
+        addResonance(280.0f, 0.6f, 0.2f);  // Mid-low resonance  
+        addResonance(450.0f, 0.4f, 0.15f); // Mid resonance
+        addResonance(1200.0f, 0.3f, 0.1f); // Upper-mid resonance
+        
+        // Prepare all filters
+        for (auto& filter : resonantFilters)
+        {
+            filter.filter.prepare(spec);
+        }
+        
+        // Output level compensation
+        outputGain = 0.7f; // Compensate for resonance boosts
+    }
+    
+    void reset()
+    {
+        for (auto& filter : resonantFilters)
+        {
+            filter.filter.reset();
+        }
+    }
+    
+    void setCabinetSize(float size) // 0.0 = small, 1.0 = large
+    {
+        cabinetSize = juce::jlimit(0.0f, 1.0f, size);
+        updateResonances();
+    }
+    
+    float processSample(float input)
+    {
+        float output = input;
+        
+        // Process through all resonant filters
+        for (auto& filter : resonantFilters)
+        {
+            float resonant = filter.filter.processSample(input);
+            output += resonant * filter.level;
+        }
+        
+        return output * outputGain;
+    }
+    
+private:
+    struct ResonantBand
+    {
+        juce::dsp::IIR::Filter<float> filter;
+        float frequency;
+        float baseQ;
+        float level;
+    };
+    
+    double sampleRate = 44100.0;
+    float cabinetSize = 0.5f;
+    float outputGain = 0.7f;
+    std::vector<ResonantBand> resonantFilters;
+    
+    void addResonance(float freq, float q, float level)
+    {
+        ResonantBand band;
+        band.frequency = freq;
+        band.baseQ = q;
+        band.level = level;
+        resonantFilters.push_back(std::move(band));
+    }
+    
+    void updateResonances()
+    {
+        for (auto& filter : resonantFilters)
+        {
+            // Adjust frequency and Q based on cabinet size
+            float scaledFreq = filter.frequency * (0.7f + 0.6f * cabinetSize);
+            float scaledQ = filter.baseQ * (0.5f + 0.5f * cabinetSize);
+            
+            auto coeffs = juce::dsp::IIR::Coefficients<float>::makePeakFilter(
+                sampleRate, scaledFreq, scaledQ, juce::Decibels::decibelsToGain(3.0f));
+            *filter.filter.coefficients = *coeffs;
+        }
+    }
+    
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CabinetResonance)
+};
+
+//==============================================================================
+// Enhanced Rotary Engine - Phase 2
+//==============================================================================
+class EnhancedRotaryEngine
+{
+public:
+    EnhancedRotaryEngine();
+    ~EnhancedRotaryEngine();
+    
+    void prepare(const juce::dsp::ProcessSpec& spec);
+    void reset();
+    void processBlock(juce::AudioBuffer<float>& buffer);
+    
+    // Enhanced parameter setters
+    void setCrossoverFrequency(float freq) { crossover.setCrossoverFrequency(freq); }
+    void setDriveType(TubeDrive::DriveType type) { tubeDrive.setDriveType(type); }
+    void setDriveAmount(float driveDb) { tubeDrive.setDriveAmount(driveDb); }
+    void setCabinetSize(float size) { cabinetResonance.setCabinetSize(size); }
+    
+    // Existing parameter setters (from Phase 1)
+    void setHornSpeed(float slowHz, float fastHz);
+    void setDrumSpeed(float slowHz, float fastHz);
+    void setRampTime(float upTime, float downTime);
+    void setSpeedState(int state);
+    void setBrakeAngle(float angle);
+    void setDopplerDepth(float depth);
+    void setAmplitudeDepth(float depth);
+    void setStereoSpread(float spread);
+    
+    // State getters for UI feedback
+    float getHornAngle() const { return hornAngle; }
+    float getDrumAngle() const { return drumAngle; }
+    float getCurrentHornSpeed() const { return currentHornSpeed; }
+    float getCurrentDrumSpeed() const { return currentDrumSpeed; }
+    bool isRamping() const { return rampProgress < 1.0f; }
+
+private:
+    // Enhanced DSP components
+    CrossoverFilter crossover;
+    DopplerProcessor hornDoppler, drumDoppler;
+    TubeDrive tubeDrive;
+    CabinetResonance cabinetResonance;
+    
+    // Phase 1 components (existing)
+    double sampleRate{44100.0};
+    
+    // Parameters (atomic for thread safety)
+    std::atomic<float> hornSpeedSlow{0.8f}, hornSpeedFast{6.8f};
+    std::atomic<float> drumSpeedSlow{0.4f}, drumSpeedFast{5.5f};
+    std::atomic<float> rampTimeUp{1.8f}, rampTimeDown{1.8f};
+    std::atomic<int> speedState{0};
+    std::atomic<float> brakeAngle{180.0f};
+    std::atomic<float> dopplerDepth{1.0f}, amDepth{1.0f};
+    std::atomic<float> stereoSpread{1.0f};
+    
+    // Internal state
+    float hornAngle{0.0f}, drumAngle{0.0f};
+    float currentHornSpeed{0.8f}, currentDrumSpeed{0.4f};
+    float targetHornSpeed{0.8f}, targetDrumSpeed{0.4f};
+    float rampProgress{1.0f}, rampDirection{1.0f};
+    
+    // Processing methods
+    void updateTargetSpeeds();
+    void processSpeedRamping();
+    void processEnhancedRotaryModulation(juce::AudioBuffer<float>& buffer);
+    
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EnhancedRotaryEngine)
+};

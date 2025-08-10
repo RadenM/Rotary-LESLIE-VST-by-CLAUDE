@@ -1,0 +1,319 @@
+//==============================================================================
+// Enhanced Rotary Engine Implementation - Phase 2
+//==============================================================================
+
+#include "EnhancedRotaryEngine.h"
+
+EnhancedRotaryEngine::EnhancedRotaryEngine() = default;
+EnhancedRotaryEngine::~EnhancedRotaryEngine() = default;
+
+void EnhancedRotaryEngine::prepare(const juce::dsp::ProcessSpec& spec)
+{
+    sampleRate = spec.sampleRate;
+    
+    // Prepare all DSP components
+    crossover.prepare(spec);
+    hornDoppler.prepare(spec);
+    drumDoppler.prepare(spec);
+    tubeDrive.prepare(spec);
+    cabinetResonance.prepare(spec);
+    
+    reset();
+}
+
+void EnhancedRotaryEngine::reset()
+{
+    hornAngle = 0.0f;
+    drumAngle = 0.0f;
+    rampProgress = 1.0f;
+    
+    crossover.reset();
+    hornDoppler.reset();
+    drumDoppler.reset();
+    tubeDrive.reset();
+    cabinetResonance.reset();
+}
+
+void EnhancedRotaryEngine::processBlock(juce::AudioBuffer<float>& buffer)
+{
+    const int numSamples = buffer.getNumSamples();
+    const int numChannels = buffer.getNumChannels();
+    
+    if (numSamples == 0 || numChannels == 0)
+        return;
+        
+    // Update speed ramping (from Phase 1)
+    processSpeedRamping();
+    
+    // Process enhanced rotary modulation
+    processEnhancedRotaryModulation(buffer);
+}
+
+void EnhancedRotaryEngine::updateTargetSpeeds()
+{
+    int state = speedState.load();
+    
+    switch (state)
+    {
+        case 0: // Slow
+            targetHornSpeed = hornSpeedSlow.load();
+            targetDrumSpeed = drumSpeedSlow.load();
+            break;
+        case 1: // Fast  
+            targetHornSpeed = hornSpeedFast.load();
+            targetDrumSpeed = drumSpeedFast.load();
+            break;
+        case 2: // Brake
+            targetHornSpeed = 0.0f;
+            targetDrumSpeed = 0.0f;
+            break;
+    }
+}
+
+void EnhancedRotaryEngine::processSpeedRamping()
+{
+    updateTargetSpeeds();
+    
+    const float speedTolerance = 0.01f;
+    if (std::abs(currentHornSpeed - targetHornSpeed) > speedTolerance ||
+        std::abs(currentDrumSpeed - targetDrumSpeed) > speedTolerance)
+    {
+        if (rampProgress >= 1.0f)
+        {
+            rampProgress = 0.0f;
+            bool isSpeedingUp = (targetHornSpeed > currentHornSpeed) || 
+                               (targetDrumSpeed > currentDrumSpeed);
+            rampDirection = isSpeedingUp ? 1.0f : -1.0f;
+        }
+    }
+    
+    if (rampProgress < 1.0f)
+    {
+        float rampTime = (rampDirection > 0) ? rampTimeUp.load() : rampTimeDown.load();
+        float rampIncrement = 1.0f / (rampTime * sampleRate);
+        
+        rampProgress = juce::jmin(1.0f, rampProgress + rampIncrement);
+        float smoothProgress = 0.5f * (1.0f - std::cos(rampProgress * juce::MathConstants<float>::pi));
+        
+        currentHornSpeed = currentHornSpeed + smoothProgress * (targetHornSpeed - currentHornSpeed);
+        currentDrumSpeed = currentDrumSpeed + smoothProgress * (targetDrumSpeed - currentDrumSpeed);
+    }
+}
+
+void EnhancedRotaryEngine::processEnhancedRotaryModulation(juce::AudioBuffer<float>& buffer)
+{
+    const int numSamples = buffer.getNumSamples();
+    const int numChannels = buffer.getNumChannels();
+    
+    float dopplerAmount = dopplerDepth.load() * 0.8f; // Increased range for real Doppler
+    float amAmount = amDepth.load() * 0.6f;
+    float balance = 0.5f; // Will be parameterized later
+    
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        // Update rotor angles
+        float hornAngleIncrement = (currentHornSpeed * 2.0f * juce::MathConstants<float>::pi) / sampleRate;
+        float drumAngleIncrement = (currentDrumSpeed * 2.0f * juce::MathConstants<float>::pi) / sampleRate;
+        
+        hornAngle += hornAngleIncrement;
+        drumAngle += drumAngleIncrement;
+        
+        if (hornAngle > 2.0f * juce::MathConstants<float>::pi) hornAngle -= 2.0f * juce::MathConstants<float>::pi;
+        if (drumAngle > 2.0f * juce::MathConstants<float>::pi) drumAngle -= 2.0f * juce::MathConstants<float>::pi;
+        
+        // Handle brake mode
+        if (speedState.load() == 2)
+        {
+            float targetAngle = brakeAngle.load() * juce::MathConstants<float>::pi / 180.0f;
+            hornAngle = targetAngle;
+            drumAngle = targetAngle;
+        }
+        
+        // Calculate rotor LFO values
+        float hornLFO = std::sin(hornAngle);
+        float drumLFO = std::sin(drumAngle);
+        
+        // Calculate Doppler amounts (approaching = negative, receding = positive)
+        float hornDopplerAmount = hornLFO * dopplerAmount;
+        float drumDopplerAmount = drumLFO * dopplerAmount;
+        
+        // Calculate amplitude modulation
+        float hornAM = 1.0f + (hornLFO * amAmount * 0.4f);
+        float drumAM = 1.0f + (drumLFO * amAmount * 0.3f); // Slightly less AM on drum
+        
+        // Process each channel
+        for (int channel = 0; channel < numChannels; ++channel)
+        {
+            float* channelData = buffer.getWritePointer(channel);
+            float inputSample = channelData[sample];
+            
+            // Apply tube drive first
+            float drivenSample = tubeDrive.processSample(inputSample);
+            
+            // Crossover filtering - separate horn and drum frequency ranges
+            auto crossoverResult = crossover.processSample(drivenSample);
+            float hornSample = crossoverResult.high;
+            float drumSample = crossoverResult.low;
+            
+            // Apply real Doppler effect using delay lines
+            hornSample = hornDoppler.processSample(hornSample, hornDopplerAmount, channel);
+            drumSample = drumDoppler.processSample(drumSample, drumDopplerAmount, channel);
+            
+            // Apply amplitude modulation
+            hornSample *= hornAM;
+            drumSample *= drumAM;
+            
+            // Apply cabinet resonance to mixed signal
+            float mixedSample = (hornSample * balance) + (drumSample * (1.0f - balance));
+            mixedSample = cabinetResonance.processSample(mixedSample);
+            
+            channelData[sample] = mixedSample;
+        }
+    }
+    
+    // Apply stereo spread if stereo
+    if (numChannels >= 2)
+        applyStereoSpread(buffer);
+}
+
+void EnhancedRotaryEngine::applyStereoSpread(juce::AudioBuffer<float>& buffer)
+{
+    const int numSamples = buffer.getNumSamples();
+    float spread = stereoSpread.load();
+    
+    if (spread == 1.0f || buffer.getNumChannels() < 2)
+        return;
+        
+    float* leftChannel = buffer.getWritePointer(0);
+    float* rightChannel = buffer.getWritePointer(1);
+    
+    // Enhanced stereo processing with rotor positioning
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        // Get current rotor positions for stereo panning
+        float hornPan = std::sin(hornAngle + juce::MathConstants<float>::pi * 0.5f); // 90° phase offset
+        float drumPan = std::sin(drumAngle + juce::MathConstants<float>::pi * 0.25f); // 45° phase offset
+        
+        float mid = (leftChannel[sample] + rightChannel[sample]) * 0.5f;
+        float side = (leftChannel[sample] - rightChannel[sample]) * 0.5f;
+        
+        // Apply rotor movement to stereo field
+        float rotorMovement = (hornPan * 0.6f + drumPan * 0.4f) * spread * 0.3f;
+        side = side * spread + rotorMovement * mid;
+        
+        leftChannel[sample] = mid + side;
+        rightChannel[sample] = mid - side;
+    }
+}
+
+// Parameter setters (existing from Phase 1)
+void EnhancedRotaryEngine::setHornSpeed(float slowHz, float fastHz)
+{
+    hornSpeedSlow.store(juce::jlimit(0.1f, 6.0f, slowHz));
+    hornSpeedFast.store(juce::jlimit(1.0f, 15.0f, fastHz));
+}
+
+void EnhancedRotaryEngine::setDrumSpeed(float slowHz, float fastHz)
+{
+    drumSpeedSlow.store(juce::jlimit(0.1f, 3.0f, slowHz));
+    drumSpeedFast.store(juce::jlimit(0.5f, 10.0f, fastHz));
+}
+
+void EnhancedRotaryEngine::setRampTime(float upTime, float downTime)
+{
+    rampTimeUp.store(juce::jlimit(0.015f, 10.0f, upTime));
+    rampTimeDown.store(juce::jlimit(0.015f, 10.0f, downTime));
+}
+
+void EnhancedRotaryEngine::setSpeedState(int state)
+{
+    speedState.store(juce::jlimit(0, 2, state));
+}
+
+void EnhancedRotaryEngine::setBrakeAngle(float angle)
+{
+    brakeAngle.store(std::fmod(angle, 360.0f));
+}
+
+void EnhancedRotaryEngine::setDopplerDepth(float depth)
+{
+    dopplerDepth.store(juce::jlimit(0.0f, 2.0f, depth));
+}
+
+void EnhancedRotaryEngine::setAmplitudeDepth(float depth)
+{
+    amDepth.store(juce::jlimit(0.0f, 2.0f, depth));
+}
+
+void EnhancedRotaryEngine::setStereoSpread(float spread)
+{
+    stereoSpread.store(juce::jlimit(0.0f, 2.0f, spread));
+}
+
+//==============================================================================
+// Enhanced Parameter Additions for Phase 2
+//==============================================================================
+
+// Add these new parameters to your ParameterLayout creation:
+
+namespace RotaryParams
+{
+    // Phase 2 additions
+    const juce::String CROSSOVER_FREQ = "crossoverFreq";
+    const juce::String DRIVE_TYPE = "driveType";
+    const juce::String CABINET_SIZE = "cabinetSize";
+}
+
+// Add these to createParameterLayout() function:
+void addPhase2Parameters(std::vector<std::unique_ptr<juce::RangedAudioParameter>>& parameters)
+{
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::CROSSOVER_FREQ, "Crossover Frequency",
+        juce::NormalisableRange<float>(200.0f, 2000.0f, 10.0f, 0.3f), 800.0f,
+        "Hz", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(int(value)) + " Hz"; }));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterChoice>(
+        RotaryParams::DRIVE_TYPE, "Drive Type",
+        juce::StringArray{"Tube", "Solid State", "Fuzz"}, 0));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::CABINET_SIZE, "Cabinet Size",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f,
+        "", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { 
+            if (value < 0.33f) return juce::String("Small");
+            if (value < 0.66f) return juce::String("Medium");
+            return juce::String("Large");
+        }));
+}
+
+//==============================================================================
+// Updated Processor Integration
+//==============================================================================
+
+// In your main processor, replace RotaryEngine with EnhancedRotaryEngine
+// and add parameter listeners for the new Phase 2 parameters:
+
+void LeslieRotaryProcessor::addPhase2ParameterListeners()
+{
+    valueTreeState.addParameterListener(RotaryParams::CROSSOVER_FREQ, this);
+    valueTreeState.addParameterListener(RotaryParams::DRIVE_TYPE, this);
+    valueTreeState.addParameterListener(RotaryParams::CABINET_SIZE, this);
+}
+
+void LeslieRotaryProcessor::handlePhase2Parameters(const juce::String& parameterID, float newValue)
+{
+    if (parameterID == RotaryParams::CROSSOVER_FREQ)
+    {
+        enhancedRotaryEngine.setCrossoverFrequency(newValue);
+    }
+    else if (parameterID == RotaryParams::DRIVE_TYPE)
+    {
+        enhancedRotaryEngine.setDriveType(static_cast<TubeDrive::DriveType>((int)newValue));
+    }
+    else if (parameterID == RotaryParams::CABINET_SIZE)
+    {
+        enhancedRotaryEngine.setCabinetSize(newValue);
+    }
+}

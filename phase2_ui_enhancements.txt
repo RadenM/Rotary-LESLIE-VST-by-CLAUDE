@@ -1,0 +1,436 @@
+//==============================================================================
+// Phase 2: Enhanced UI Components
+// New controls for crossover, drive type, cabinet modeling
+//==============================================================================
+
+#pragma once
+#include <JuceHeader.h>
+#include "EnhancedLeslieRotaryProcessor.h"
+
+//==============================================================================
+// Enhanced Rotor Visualizer with Drive and Filter Feedback
+//==============================================================================
+class EnhancedRotorVisualizer : public juce::Component, public juce::Timer
+{
+public:
+    EnhancedRotorVisualizer(EnhancedLeslieRotaryProcessor& p) : processor(p)
+    {
+        startTimerHz(60); // 60 FPS
+    }
+    
+    ~EnhancedRotorVisualizer() override
+    {
+        stopTimer();
+    }
+    
+    void paint(juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat();
+        
+        // Background with subtle drive glow effect
+        g.setColour(juce::Colour(0xff1E1E1E));
+        g.fillRoundedRectangle(bounds, 8.0f);
+        
+        // Drive glow effect based on drive amount
+        float driveAmount = *processor.getValueTreeState().getRawParameterValue(RotaryParams::DRIVE_GAIN);
+        if (driveAmount > 0.0f)
+        {
+            float glowIntensity = juce::jmap(driveAmount, 0.0f, 24.0f, 0.0f, 0.3f);
+            juce::Colour glowColor = juce::Colour(0xffE74C3C).withAlpha(glowIntensity);
+            
+            g.setColour(glowColor);
+            g.fillRoundedRectangle(bounds.reduced(2), 6.0f);
+        }
+        
+        // Border with crossover frequency visualization
+        drawCrossoverIndicator(g, bounds);
+        
+        // Horn rotor (top)
+        auto hornBounds = bounds.removeFromTop(bounds.getHeight() * 0.45f).reduced(20);
+        drawEnhancedRotor(g, hornBounds, hornAngle, juce::Colour(0xff27AE60), "HORN", true);
+        
+        // Crossover frequency line
+        g.setColour(juce::Colour(0xff3498DB).withAlpha(0.6f));
+        float crossoverY = hornBounds.getBottom() + 10;
+        g.drawLine(bounds.getX() + 20, crossoverY, bounds.getRight() - 20, crossoverY, 2.0f);
+        
+        // Crossover frequency label
+        float crossoverFreq = *processor.getValueTreeState().getRawParameterValue(RotaryParams::CROSSOVER_FREQ);
+        g.setFont(juce::Font(10.0f, juce::Font::bold));
+        g.setColour(juce::Colour(0xff3498DB));
+        g.drawText(juce::String(int(crossoverFreq)) + " Hz", 
+                  bounds.removeFromTop(crossoverY + 15).removeFromBottom(15), 
+                  juce::Justification::centred);
+        
+        // Drum rotor (bottom)
+        auto drumBounds = bounds.reduced(20);
+        drawEnhancedRotor(g, drumBounds, drumAngle, juce::Colour(0xffF39C12), "DRUM", false);
+        
+        // Speed and drive status
+        drawStatusIndicators(g, bounds);
+    }
+    
+    void timerCallback() override
+    {
+        auto& engine = processor.getEnhancedRotaryEngine();
+        hornAngle = engine.getHornAngle();
+        drumAngle = engine.getDrumAngle();
+        repaint();
+    }
+    
+private:
+    void drawCrossoverIndicator(juce::Graphics& g, juce::Rectangle<float> bounds)
+    {
+        // Dynamic border color based on crossover frequency
+        float crossoverFreq = *processor.getValueTreeState().getRawParameterValue(RotaryParams::CROSSOVER_FREQ);
+        float hue = juce::jmap(crossoverFreq, 200.0f, 2000.0f, 0.6f, 0.2f); // Blue to red
+        juce::Colour borderColor = juce::Colour::fromHSV(hue, 0.8f, 0.9f, 1.0f);
+        
+        g.setColour(borderColor);
+        g.drawRoundedRectangle(bounds.reduced(1), 8.0f, 2.0f);
+    }
+    
+    void drawEnhancedRotor(juce::Graphics& g, juce::Rectangle<float> bounds, 
+                          float angle, juce::Colour color, const juce::String& label, bool isHorn)
+    {
+        auto center = bounds.getCentre();
+        auto radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.35f;
+        
+        // Dynamic rotor intensity based on speed
+        auto& engine = processor.getEnhancedRotaryEngine();
+        float currentSpeed = isHorn ? engine.getCurrentHornSpeed() : engine.getCurrentDrumSpeed();
+        float intensity = juce::jlimit(0.3f, 1.0f, currentSpeed / 5.0f);
+        
+        // Rotor circle with speed-based opacity
+        g.setColour(color.withAlpha(0.2f + intensity * 0.3f));
+        g.fillEllipse(center.x - radius, center.y - radius, radius * 2, radius * 2);
+        
+        g.setColour(color.withAlpha(intensity));
+        g.drawEllipse(center.x - radius, center.y - radius, radius * 2, radius * 2, 2.0f);
+        
+        // Rotor blades with motion blur effect
+        int numBlades = isHorn ? 4 : 3; // Horn has 4 blades, drum has 3
+        float bladeLength = radius * 0.7f;
+        
+        for (int i = 0; i < numBlades; ++i)
+        {
+            float bladeAngle = angle + (i * 2.0f * juce::MathConstants<float>::pi / numBlades);
+            
+            // Motion blur effect for fast rotation
+            if (currentSpeed > 2.0f)
+            {
+                float blurAmount = juce::jmin(0.3f, (currentSpeed - 2.0f) / 8.0f);
+                for (int blur = 0; blur < 3; ++blur)
+                {
+                    float blurAngle = bladeAngle - blur * blurAmount * 0.1f;
+                    float blurAlpha = (3 - blur) / 3.0f * intensity * 0.5f;
+                    
+                    drawBlade(g, center, blurAngle, bladeLength, color.withAlpha(blurAlpha));
+                }
+            }
+            else
+            {
+                drawBlade(g, center, bladeAngle, bladeLength, color.withAlpha(intensity));
+            }
+        }
+        
+        // Center hub
+        g.setColour(color.withAlpha(intensity));
+        g.fillEllipse(center.x - 4, center.y - 4, 8, 8);
+        
+        // Label with frequency range indicator
+        g.setFont(juce::Font(9.0f, juce::Font::bold));
+        g.setColour(juce::Colours::white.withAlpha(0.8f));
+        auto labelBounds = bounds.removeFromBottom(15);
+        
+        juce::String freqRange = isHorn ? " (>800Hz)" : " (<800Hz)";
+        g.drawText(label + freqRange, labelBounds, juce::Justification::centred);
+    }
+    
+    void drawBlade(juce::Graphics& g, juce::Point<float> center, float angle, 
+                   float length, juce::Colour color)
+    {
+        float x1 = center.x + std::cos(angle) * length * 0.3f;
+        float y1 = center.y + std::sin(angle) * length * 0.3f;
+        float x2 = center.x + std::cos(angle) * length;
+        float y2 = center.y + std::sin(angle) * length;
+        
+        g.setColour(color);
+        g.drawLine(x1, y1, x2, y2, 2.5f);
+    }
+    
+    void drawStatusIndicators(juce::Graphics& g, juce::Rectangle<float> bounds)
+    {
+        auto& engine = processor.getEnhancedRotaryEngine();
+        
+        // Speed status
+        juce::String speedText = "SLOW";
+        juce::Colour speedColor = juce::Colour(0xff27AE60);
+        
+        if (engine.isRamping())
+        {
+            speedText = "RAMP";
+            speedColor = juce::Colour(0xffF39C12);
+        }
+        else if (engine.getCurrentHornSpeed() > 3.0f)
+        {
+            speedText = "FAST"; 
+            speedColor = juce::Colour(0xffE74C3C);
+        }
+        else if (engine.getCurrentHornSpeed() < 0.1f)
+        {
+            speedText = "BRAKE";
+            speedColor = juce::Colour(0xff8E44AD);
+        }
+        
+        // Drive type indicator
+        int driveType = (int)*processor.getValueTreeState().getRawParameterValue(RotaryParams::DRIVE_TYPE);
+        juce::String driveText = (driveType == 0) ? "TUBE" : 
+                                (driveType == 1) ? "SOLID" : "FUZZ";
+        
+        g.setFont(juce::Font(11.0f, juce::Font::bold));
+        g.setColour(speedColor);
+        g.drawText(speedText, bounds.removeFromBottom(25).removeFromLeft(bounds.getWidth() / 2), 
+                  juce::Justification::centred);
+                  
+        g.setColour(juce::Colour(0xffE67E22));
+        g.drawText(driveText, bounds.removeFromBottom(25), juce::Justification::centred);
+    }
+    
+    EnhancedLeslieRotaryProcessor& processor;
+    float hornAngle = 0.0f;
+    float drumAngle = 0.0f;
+    
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EnhancedRotorVisualizer)
+};
+
+//==============================================================================
+// Enhanced Editor with Phase 2 Controls
+//==============================================================================
+class EnhancedLeslieRotaryEditor : public juce::AudioProcessorEditor
+{
+public:
+    EnhancedLeslieRotaryEditor(EnhancedLeslieRotaryProcessor& p)
+        : AudioProcessorEditor(&p), processor(p), rotorVisualizer(p)
+    {
+        setSize(900, 650); // Slightly larger for new controls
+        setResizable(true, true);
+        
+        setupControls();
+        setupLayout();
+        
+        // Make components visible
+        addAndMakeVisible(rotorVisualizer);
+        addAndMakeVisible(speedControlGroup);
+        addAndMakeVisible(toneControlGroup);
+        addAndMakeVisible(driveControlGroup); // New Phase 2 group
+        addAndMakeVisible(outputControlGroup);
+        
+        attachSliders();
+    }
+    
+    ~EnhancedLeslieRotaryEditor() override = default;
+    
+    void paint(juce::Graphics& g) override
+    {
+        // Modern gradient background
+        auto bounds = getLocalBounds().toFloat();
+        juce::ColourGradient gradient(juce::Colour(0xff2C3E50), 0, 0,
+                                     juce::Colour(0xff34495E), 0, getHeight(), false);
+        g.setGradientFill(gradient);
+        g.fillRect(bounds);
+        
+        // Header with enhanced styling
+        auto headerBounds = juce::Rectangle<float>(0, 0, getWidth(), 70);
+        juce::ColourGradient headerGradient(juce::Colour(0xff34495E), 0, 0,
+                                          juce::Colour(0xff2C3E50), 0, 70, false);
+        g.setGradientFill(headerGradient);
+        g.fillRect(headerBounds);
+        
+        // Header border
+        g.setColour(juce::Colour(0xff4A90E2));
+        g.drawLine(0, 70, getWidth(), 70, 2.0f);
+        
+        // Title with shadow effect
+        g.setColour(juce::Colours::black.withAlpha(0.5f));
+        g.setFont(juce::Font(26.0f, juce::Font::bold));
+        g.drawText("LESLIE ROTARY", 22, 12, getWidth() - 44, 40, juce::Justification::centred);
+        
+        g.setColour(juce::Colours::white);
+        g.drawText("LESLIE ROTARY", 20, 10, getWidth() - 40, 40, juce::Justification::centred);
+        
+        // Subtitle
+        g.setFont(juce::Font(12.0f));
+        g.setColour(juce::Colour(0xff95A5A6));
+        g.drawText("Enhanced DSP • Phase 2", 20, 40, getWidth() - 40, 20, juce::Justification::centred);
+        
+        // Section dividers with enhanced styling
+        g.setColour(juce::Colour(0xff4A90E2).withAlpha(0.3f));
+        int sectionWidth = getWidth() / 4;
+        for (int i = 1; i < 4; ++i)
+        {
+            g.drawVerticalLine(sectionWidth * i, 80, getHeight() - 10);
+        }
+    }
+    
+    void resized() override
+    {
+        auto bounds = getLocalBounds();
+        bounds.removeFromTop(80); // Header space
+        
+        // Four column layout for Phase 2
+        auto leftSection = bounds.removeFromLeft(bounds.getWidth() / 4).reduced(8);
+        auto centerLeftSection = bounds.removeFromLeft(bounds.getWidth() / 3).reduced(8);
+        auto centerRightSection = bounds.removeFromLeft(bounds.getWidth() / 2).reduced(8);
+        auto rightSection = bounds.reduced(8);
+        
+        // Layout sections
+        speedControlGroup.setBounds(leftSection);
+        
+        // Center sections - rotor visual on top, drive controls below
+        rotorVisualizer.setBounds(centerLeftSection.removeFromTop(220));
+        driveControlGroup.setBounds(centerLeftSection);
+        
+        toneControlGroup.setBounds(centerRightSection);
+        outputControlGroup.setBounds(rightSection);
+    }
+    
+private:
+    void setupControls()
+    {
+        // Existing controls setup (from Phase 1)...
+        // [Previous control setup code would go here]
+        
+        // New Phase 2 Drive Control Group
+        driveControlGroup.setText("DRIVE & CHARACTER");
+        driveControlGroup.setColour(juce::GroupComponent::outlineColourId, juce::Colour(0xffE67E22));
+        driveControlGroup.setColour(juce::GroupComponent::textColourId, juce::Colours::white);
+        
+        // Drive Type Combo
+        driveTypeCombo.addItem("Tube", 1);
+        driveTypeCombo.addItem("Solid State", 2);
+        driveTypeCombo.addItem("Fuzz", 3);
+        driveTypeCombo.setSelectedItemIndex(0);
+        driveTypeCombo.setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff34495E));
+        driveTypeCombo.setColour(juce::ComboBox::textColourId, juce::Colours::white);
+        
+        // Crossover Frequency
+        crossoverFreqKnob.setTextValueSuffix(" Hz");
+        crossoverFreqKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xff3498DB));
+        
+        // Cabinet Size
+        cabinetSizeKnob.setTextValueSuffix("");
+        cabinetSizeKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xff8E44AD));
+        
+        // Add to group
+        driveControlGroup.addAndMakeVisible(driveTypeCombo);
+        driveControlGroup.addAndMakeVisible(crossoverFreqKnob);
+        driveControlGroup.addAndMakeVisible(cabinetSizeKnob);
+        
+        // Labels
+        auto addLabel = [&](juce::Label& label, const juce::String& text, juce::Component& parent) {
+            label.setText(text, juce::dontSendNotification);
+            label.setColour(juce::Label::textColourId, juce::Colours::white);
+            label.setJustificationType(juce::Justification::centred);
+            parent.addAndMakeVisible(label);
+        };
+        
+        addLabel(driveTypeLabel, "Drive Type", driveControlGroup);
+        addLabel(crossoverFreqLabel, "Crossover", driveControlGroup);
+        addLabel(cabinetSizeLabel, "Cabinet", driveControlGroup);
+    }
+    
+    void setupLayout()
+    {
+        // Drive control layout
+        auto layoutDriveControls = [&]() {
+            auto bounds = driveControlGroup.getLocalBounds().reduced(10);
+            bounds.removeFromTop(20); // Group label space
+            
+            // Drive type combo at top
+            driveTypeLabel.setBounds(bounds.removeFromTop(20));
+            driveTypeCombo.setBounds(bounds.removeFromTop(30).reduced(5));
+            
+            bounds.removeFromTop(10); // Spacing
+            
+            // Two knobs side by side
+            auto knobRow = bounds.removeFromTop(100);
+            auto leftKnob = knobRow.removeFromLeft(knobRow.getWidth() / 2).reduced(5);
+            auto rightKnob = knobRow.reduced(5);
+            
+            crossoverFreqLabel.setBounds(leftKnob.removeFromTop(20));
+            crossoverFreqKnob.setBounds(leftKnob);
+            cabinetSizeLabel.setBounds(rightKnob.removeFromTop(20));
+            cabinetSizeKnob.setBounds(rightKnob);
+        };
+        
+        driveControlGroup.resized = layoutDriveControls;
+    }
+    
+    void attachSliders()
+    {
+        using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
+        using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+        
+        // Phase 1 attachments (existing)...
+        // [Previous attachment code would go here]
+        
+        // Phase 2 new attachments
+        driveTypeAttachment = std::make_unique<ComboAttachment>(
+            processor.getValueTreeState(), RotaryParams::DRIVE_TYPE, driveTypeCombo);
+        crossoverFreqAttachment = std::make_unique<SliderAttachment>(
+            processor.getValueTreeState(), RotaryParams::CROSSOVER_FREQ, crossoverFreqKnob);
+        cabinetSizeAttachment = std::make_unique<SliderAttachment>(
+            processor.getValueTreeState(), RotaryParams::CABINET_SIZE, cabinetSizeKnob);
+    }
+    
+    EnhancedLeslieRotaryProcessor& processor;
+    
+    // Visual components
+    EnhancedRotorVisualizer rotorVisualizer;
+    
+    // Control groups
+    juce::GroupComponent speedControlGroup;
+    juce::GroupComponent toneControlGroup;
+    juce::GroupComponent driveControlGroup; // New Phase 2 group
+    juce::GroupComponent outputControlGroup;
+    
+    // Phase 1 controls (existing)
+    RotaryKnob hornSlowKnob, hornFastKnob, drumSlowKnob, drumFastKnob;
+    RotaryKnob rampUpKnob, rampDownKnob;
+    RotaryKnob driveKnob, balanceKnob, dopplerKnob, amDepthKnob, stereoSpreadKnob;
+    RotaryKnob outputLevelKnob;
+    juce::ComboBox speedControlCombo, outputModeCombo;
+    juce::TextButton brakeButton;
+    
+    // Phase 2 new controls
+    juce::ComboBox driveTypeCombo;
+    RotaryKnob crossoverFreqKnob;
+    RotaryKnob cabinetSizeKnob;
+    
+    // Labels (existing + new)
+    juce::Label hornSlowLabel, hornFastLabel, drumSlowLabel, drumFastLabel;
+    juce::Label rampUpLabel, rampDownLabel;
+    juce::Label driveLabel, balanceLabel, dopplerLabel, amDepthLabel, stereoSpreadLabel;
+    juce::Label outputLevelLabel, outputModeLabel;
+    
+    // Phase 2 new labels
+    juce::Label driveTypeLabel, crossoverFreqLabel, cabinetSizeLabel;
+    
+    // Attachments (existing + new)
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> hornSlowAttachment, hornFastAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> drumSlowAttachment, drumFastAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> rampUpAttachment, rampDownAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> driveAttachment, balanceAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> dopplerAttachment, amDepthAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> stereoSpreadAttachment, outputLevelAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> speedControlAttachment, outputModeAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> brakeAttachment;
+    
+    // Phase 2 new attachments
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> driveTypeAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> crossoverFreqAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> cabinetSizeAttachment;
+    
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EnhancedLeslieRotaryEditor)
+};

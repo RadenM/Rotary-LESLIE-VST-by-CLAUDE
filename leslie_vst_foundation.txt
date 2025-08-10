@@ -1,0 +1,296 @@
+//==============================================================================
+// Leslie Rotary VST Plugin - Foundation Architecture
+// Modern BOSS RT-2 inspired rotary speaker simulation
+//==============================================================================
+
+#pragma once
+#include <JuceHeader.h>
+
+//==============================================================================
+// Parameter IDs and Ranges
+//==============================================================================
+namespace RotaryParams
+{
+    // Core Rotor Engine
+    const juce::String HORN_SPEED_SLOW = "hornSpeedSlow";
+    const juce::String HORN_SPEED_FAST = "hornSpeedFast";
+    const juce::String DRUM_SPEED_SLOW = "drumSpeedSlow";
+    const juce::String DRUM_SPEED_FAST = "drumSpeedFast";
+    const juce::String RAMP_TIME_UP = "rampTimeUp";
+    const juce::String RAMP_TIME_DOWN = "rampTimeDown";
+    const juce::String RAMP_CURVE = "rampCurve";
+    const juce::String BRAKE_ENGAGE = "brakeEngage";
+    const juce::String BRAKE_ANGLE = "brakeAngle";
+    const juce::String DOPPLER_DEPTH = "dopplerDepth";
+    const juce::String AM_DEPTH = "amDepth";
+    const juce::String STEREO_SPREAD = "stereoSpread";
+    
+    // Drive & Tone
+    const juce::String DRIVE_GAIN = "driveGain";
+    const juce::String DRIVE_CHARACTER = "driveCharacter";
+    const juce::String MID_BOOST = "midBoost";
+    const juce::String HORN_DRUM_BALANCE = "hornDrumBalance";
+    const juce::String EQ_LOW = "eqLow";
+    const juce::String EQ_HIGH = "eqHigh";
+    
+    // Mic & Room
+    const juce::String HORN_MIC_DISTANCE = "hornMicDistance";
+    const juce::String DRUM_MIC_DISTANCE = "drumMicDistance";
+    const juce::String HORN_MIC_ANGLE = "hornMicAngle";
+    const juce::String DRUM_MIC_ANGLE = "drumMicAngle";
+    const juce::String ROOM_SIZE = "roomSize";
+    const juce::String ROOM_LEVEL = "roomLevel";
+    const juce::String MECHANICAL_NOISE = "mechanicalNoise";
+    const juce::String BELT_SLIP = "beltSlip";
+    
+    // Output & Routing
+    const juce::String OUTPUT_MODE = "outputMode";
+    const juce::String PHASE_ALIGN = "phaseAlign";
+    const juce::String LATENCY_MODE = "latencyMode";
+    const juce::String OUTPUT_LEVEL = "outputLevel";
+    
+    // Performance Control
+    const juce::String SPEED_CONTROL = "speedControl";
+    const juce::String MOMENTARY_MODE = "momentaryMode";
+    const juce::String TEMPO_SYNC = "tempoSync";
+    const juce::String TEMPO_DIVISION = "tempoDivision";
+    
+    // Preset & Morph
+    const juce::String PRESET_MORPH = "presetMorph";
+}
+
+//==============================================================================
+// Rotary Engine - Core DSP Class
+//==============================================================================
+class RotaryEngine
+{
+public:
+    RotaryEngine();
+    ~RotaryEngine();
+    
+    void prepare(const juce::dsp::ProcessSpec& spec);
+    void reset();
+    void processBlock(juce::AudioBuffer<float>& buffer);
+    
+    // Parameter setters with thread safety
+    void setHornSpeed(float slowHz, float fastHz);
+    void setDrumSpeed(float slowHz, float fastHz);
+    void setRampTime(float upTime, float downTime);
+    void setSpeedState(int state); // 0=slow, 1=fast, 2=brake
+    void setBrakeAngle(float angle);
+    void setDopplerDepth(float depth);
+    void setAmplitudeDepth(float depth);
+    void setStereoSpread(float spread);
+    
+    // State getters for UI feedback
+    float getHornAngle() const { return hornAngle; }
+    float getDrumAngle() const { return drumAngle; }
+    float getCurrentHornSpeed() const { return currentHornSpeed; }
+    float getCurrentDrumSpeed() const { return currentDrumSpeed; }
+    bool isRamping() const { return rampProgress < 1.0f; }
+
+private:
+    // Core parameters
+    std::atomic<float> hornSpeedSlow{0.8f}, hornSpeedFast{6.8f};
+    std::atomic<float> drumSpeedSlow{0.4f}, drumSpeedFast{5.5f};
+    std::atomic<float> rampTimeUp{1.8f}, rampTimeDown{1.8f};
+    std::atomic<int> speedState{0}; // 0=slow, 1=fast, 2=brake
+    std::atomic<float> brakeAngle{180.0f};
+    std::atomic<float> dopplerDepth{1.0f}, amDepth{1.0f};
+    std::atomic<float> stereoSpread{1.0f};
+    
+    // Internal state
+    double sampleRate{44100.0};
+    float hornAngle{0.0f}, drumAngle{0.0f};
+    float currentHornSpeed{0.8f}, currentDrumSpeed{0.4f};
+    float targetHornSpeed{0.8f}, targetDrumSpeed{0.4f};
+    float rampProgress{1.0f};
+    float rampDirection{1.0f}; // 1.0 = up, -1.0 = down
+    
+    // DSP processing
+    void updateTargetSpeeds();
+    void processSpeedRamping();
+    void processRotaryModulation(juce::AudioBuffer<float>& buffer);
+    void applyStereoSpread(juce::AudioBuffer<float>& buffer);
+    
+    // Modulation oscillators
+    juce::dsp::Oscillator<float> hornLFO, drumLFO;
+    
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RotaryEngine)
+};
+
+//==============================================================================
+// Main Plugin Processor
+//==============================================================================
+class LeslieRotaryProcessor : public juce::AudioProcessor
+{
+public:
+    LeslieRotaryProcessor();
+    ~LeslieRotaryProcessor() override;
+    
+    //==============================================================================
+    void prepareToPlay(double sampleRate, int samplesPerBlock) override;
+    void releaseResources() override;
+    
+    bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
+    
+    void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    
+    //==============================================================================
+    juce::AudioProcessorEditor* createEditor() override;
+    bool hasEditor() const override { return true; }
+    
+    //==============================================================================
+    const juce::String getName() const override { return JucePlugin_Name; }
+    
+    bool acceptsMidi() const override { return false; }
+    bool producesMidi() const override { return false; }
+    bool isMidiEffect() const override { return false; }
+    double getTailLengthSeconds() const override { return 0.0; }
+    
+    //==============================================================================
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram(int index) override {}
+    const juce::String getProgramName(int index) override { return {}; }
+    void changeProgramName(int index, const juce::String& newName) override {}
+    
+    //==============================================================================
+    void getStateInformation(juce::MemoryBlock& destData) override;
+    void setStateInformation(const void* data, int sizeInBytes) override;
+    
+    //==============================================================================
+    juce::AudioProcessorValueTreeState& getValueTreeState() { return valueTreeState; }
+    RotaryEngine& getRotaryEngine() { return rotaryEngine; }
+
+private:
+    //==============================================================================
+    juce::AudioProcessorValueTreeState valueTreeState;
+    RotaryEngine rotaryEngine;
+    
+    // Parameter listeners
+    void parameterChanged(const juce::String& parameterID, float newValue);
+    
+    //==============================================================================
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LeslieRotaryProcessor)
+};
+
+//==============================================================================
+// Parameter Layout Creation
+//==============================================================================
+juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
+{
+    std::vector<std::unique_ptr<juce::RangedAudioParameter>> parameters;
+    
+    // Core Rotor Engine Parameters
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::HORN_SPEED_SLOW, "Horn Speed (Slow)",
+        juce::NormalisableRange<float>(0.1f, 6.0f, 0.1f), 0.8f,
+        "Hz", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(value, 1) + " Hz"; }));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::HORN_SPEED_FAST, "Horn Speed (Fast)",
+        juce::NormalisableRange<float>(1.0f, 15.0f, 0.1f), 6.8f,
+        "Hz", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(value, 1) + " Hz"; }));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::DRUM_SPEED_SLOW, "Drum Speed (Slow)",
+        juce::NormalisableRange<float>(0.1f, 3.0f, 0.1f), 0.4f,
+        "Hz", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(value, 1) + " Hz"; }));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::DRUM_SPEED_FAST, "Drum Speed (Fast)",
+        juce::NormalisableRange<float>(0.5f, 10.0f, 0.1f), 5.5f,
+        "Hz", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(value, 1) + " Hz"; }));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::RAMP_TIME_UP, "Ramp Time (Up)",
+        juce::NormalisableRange<float>(0.015f, 10.0f, 0.001f, 0.3f), 1.8f,
+        "s", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return value < 1.0f ? 
+            juce::String(int(value * 1000)) + " ms" : 
+            juce::String(value, 1) + " s"; }));
+            
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::RAMP_TIME_DOWN, "Ramp Time (Down)",
+        juce::NormalisableRange<float>(0.015f, 10.0f, 0.001f, 0.3f), 1.8f,
+        "s", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return value < 1.0f ? 
+            juce::String(int(value * 1000)) + " ms" : 
+            juce::String(value, 1) + " s"; }));
+            
+    parameters.push_back(std::make_unique<juce::AudioParameterChoice>(
+        RotaryParams::SPEED_CONTROL, "Speed Control",
+        juce::StringArray{"Slow", "Fast", "Brake"}, 0));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterBool>(
+        RotaryParams::BRAKE_ENGAGE, "Brake", false));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::BRAKE_ANGLE, "Brake Angle",
+        juce::NormalisableRange<float>(0.0f, 360.0f, 1.0f), 180.0f,
+        "°", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(int(value)) + "°"; }));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::DOPPLER_DEPTH, "Doppler Depth",
+        juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 1.0f,
+        "%", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(int(value * 100)) + "%"; }));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::AM_DEPTH, "Amplitude Depth",
+        juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 1.0f,
+        "%", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(int(value * 100)) + "%"; }));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::STEREO_SPREAD, "Stereo Spread",
+        juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 1.0f,
+        "%", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(int(value * 100)) + "%"; }));
+    
+    // Drive & Tone Parameters
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::DRIVE_GAIN, "Drive",
+        juce::NormalisableRange<float>(0.0f, 24.0f, 0.1f), 6.0f,
+        "dB", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(value, 1) + " dB"; }));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterChoice>(
+        RotaryParams::DRIVE_CHARACTER, "Drive Character",
+        juce::StringArray{"Tube", "Solid", "Fuzz"}, 0));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterChoice>(
+        RotaryParams::MID_BOOST, "Mid Boost",
+        juce::StringArray{"Flat", "+3dB", "+6dB"}, 1));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::HORN_DRUM_BALANCE, "Horn/Drum Balance",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f,
+        "", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { 
+            if (value < 0.45f) return "Drum " + juce::String(int((0.5f - value) * 200)) + "%";
+            if (value > 0.55f) return "Horn " + juce::String(int((value - 0.5f) * 200)) + "%";
+            return juce::String("Center");
+        }));
+    
+    // Output & Routing
+    parameters.push_back(std::make_unique<juce::AudioParameterChoice>(
+        RotaryParams::OUTPUT_MODE, "Output Mode",
+        juce::StringArray{"Stereo", "Mono", "Wet L-Dry R", "Dual Mono"}, 0));
+        
+    parameters.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::OUTPUT_LEVEL, "Output Level",
+        juce::NormalisableRange<float>(-60.0f, 12.0f, 0.1f), 0.0f,
+        "dB", juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { 
+            return value <= -60.0f ? "-∞ dB" : juce::String(value, 1) + " dB"; 
+        }));
+    
+    return { parameters.begin(), parameters.end() };
+}
