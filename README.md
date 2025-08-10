@@ -1,0 +1,2 @@
+# Rotary-LESLIE-VST-by-CLAUDE
+Rotary LESLIE VST by CLAUDE inspired on the BOSS ROTARY ENSEMBLE
