@@ -17,6 +17,9 @@ namespace RotaryParams
     static constexpr const char* HORN_DRUM_BALANCE = "hornDrumBalance";
     static constexpr const char* OUTPUT_MODE       = "outputMode"; // not used yet
     static constexpr const char* OUTPUT_LEVEL      = "outputLevel";
+    // Standalone utility
+    static constexpr const char* TEST_TONE_ON      = "testToneOn";     // bool (0/1)
+    static constexpr const char* TEST_TONE_FREQ    = "testToneFreq";   // Hz
 }
 
 class RotaryEngine
@@ -111,4 +114,6 @@ public:
 private:
     juce::AudioProcessorValueTreeState valueTreeState;
     RotaryEngine rotaryEngine;
+    // Standalone test tone
+    double testPhase { 0.0 };
 };

@@ -241,6 +241,15 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
         RotaryParams::OUTPUT_LEVEL, "Output",
         juce::NormalisableRange<float>(-60.0f, 12.0f, 0.1f), 0.0f));
 
+#if JucePlugin_Build_Standalone
+    // Standalone utility parameters (not exposed in VST/AU)
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        RotaryParams::TEST_TONE_ON, "Test Tone", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        RotaryParams::TEST_TONE_FREQ, "Test Freq",
+        juce::NormalisableRange<float>(20.0f, 2000.0f, 0.01f, 0.3f), 440.0f));
+#endif
+
     return { params.begin(), params.end() };
 }
 
@@ -261,6 +270,7 @@ void LeslieRotaryProcessor::prepareToPlay(double sr, int spb)
 {
     juce::dsp::ProcessSpec spec; spec.sampleRate = sr; spec.maximumBlockSize = (juce::uint32) spb; spec.numChannels = (juce::uint32) getTotalNumOutputChannels();
     rotaryEngine.prepare(spec);
+    testPhase = 0.0;
 
     // prime engine with current params
     rotaryEngine.setHornSpeed(*valueTreeState.getRawParameterValue(RotaryParams::HORN_SPEED_SLOW),
@@ -294,6 +304,27 @@ bool LeslieRotaryProcessor::isBusesLayoutSupported(const BusesLayout& layouts) c
 void LeslieRotaryProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
+
+#if JucePlugin_Build_Standalone
+    // Generate a test tone (replaces input) when enabled in Standalone build
+    const bool toneOn = (*valueTreeState.getRawParameterValue(RotaryParams::TEST_TONE_ON) > 0.5f);
+    if (toneOn)
+    {
+        const float freq = *valueTreeState.getRawParameterValue(RotaryParams::TEST_TONE_FREQ);
+        const double sr = getSampleRate();
+        const int n = buffer.getNumSamples();
+        const int chs = buffer.getNumChannels();
+        for (int s = 0; s < n; ++s)
+        {
+            float x = (float) std::sin(testPhase);
+            testPhase += 2.0 * juce::MathConstants<double>::pi * (double) freq / juce::jmax(1.0, sr);
+            if (testPhase >= 2.0 * juce::MathConstants<double>::pi)
+                testPhase -= 2.0 * juce::MathConstants<double>::pi;
+            for (int ch = 0; ch < chs; ++ch)
+                buffer.setSample(ch, s, x);
+        }
+    }
+#endif
 
     // update any runtime-changed params cheaply (no listeners for now)
     rotaryEngine.setSpeedState((int) *valueTreeState.getRawParameterValue(RotaryParams::SPEED_CONTROL));

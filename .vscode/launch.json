@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Leslie Standalone (Release)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "G:/Repos/Rotary by claude/Rotary-LESLIE-VST-by-CLAUDE/build/LeslieRotaryVST_artefacts/Release/Standalone/Leslie Rotary.exe",
+      "cwd": "G:/Repos/Rotary by claude/Rotary-LESLIE-VST-by-CLAUDE/build/LeslieRotaryVST_artefacts/Release/Standalone",
+      "console": "internalConsole",
+      "stopAtEntry": false
+    }
+  ]
+}

@@ -80,6 +80,18 @@ public:
             processor.getValueTreeState(), RotaryParams::SPEED_CONTROL, speed);
 
         addAndMakeVisible(visual);
+
+#if JucePlugin_Build_Standalone
+        // Test tone controls (Standalone only)
+        testToneLabel.setText("Test Tone", juce::dontSendNotification);
+        testToneLabel.setJustificationType(juce::Justification::centredLeft);
+        addAndMakeVisible(testToneLabel);
+        addAndMakeVisible(testTone);
+        testToneAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            processor.getValueTreeState(), RotaryParams::TEST_TONE_ON, testTone);
+
+        addKnob(testFreq, testFreqLabel, "Test Freq", RotaryParams::TEST_TONE_FREQ);
+#endif
     }
 
     void paint(juce::Graphics& g) override
@@ -105,7 +117,16 @@ public:
         speedLabel.setBounds(speedRow.removeFromLeft(60));
         speed.setBounds(speedRow.removeFromLeft(120));
 
-        visual.setBounds(r.reduced(10));
+        auto bottom = r;
+#if JucePlugin_Build_Standalone
+        auto toneRow = bottom.removeFromBottom(50).reduced(6);
+        auto toneLeft = toneRow.removeFromLeft(200);
+        testToneLabel.setBounds(toneLeft.removeFromLeft(80));
+        testTone.setBounds(toneLeft.removeFromLeft(24));
+        testFreqLabel.setBounds(toneRow.removeFromLeft(80));
+        testFreq.setBounds(toneRow.removeFromLeft(200));
+#endif
+        visual.setBounds(bottom.reduced(10));
     }
 
 private:
@@ -161,4 +182,11 @@ private:
     juce::OwnedArray<juce::AudioProcessorValueTreeState::SliderAttachment> knobAttachments;
 
     RotorVisualizer visual;
+
+#if JucePlugin_Build_Standalone
+    // Standalone-only controls
+    juce::ToggleButton testTone; juce::Label testToneLabel;
+    RotaryKnob testFreq; juce::Label testFreqLabel;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> testToneAttachment;
+#endif
 };

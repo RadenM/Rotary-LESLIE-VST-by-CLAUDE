@@ -1,0 +1,40 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Configure (VS2022 x64)",
+      "type": "shell",
+      "command": "cmake -S . -B build -G \"Visual Studio 17 2022\" -A x64",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "Build VST3 (Release)",
+      "type": "shell",
+      "command": "cmake --build build --config Release --target LeslieRotaryVST_VST3",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": ["Configure (VS2022 x64)"],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "Build Standalone (Release)",
+      "type": "shell",
+      "command": "cmake --build build --config Release --target LeslieRotaryVST_Standalone",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": ["Configure (VS2022 x64)"],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "Run Standalone (Release)",
+      "type": "shell",
+      "command": "start \"LeslieStandalone\" \"G:\\Repos\\Rotary by claude\\Rotary-LESLIE-VST-by-CLAUDE\\build\\LeslieRotaryVST_artefacts\\Release\\Standalone\\Leslie Rotary.exe\"",
+      "dependsOn": ["Build Standalone (Release)"]
+    }
+  ]
+}

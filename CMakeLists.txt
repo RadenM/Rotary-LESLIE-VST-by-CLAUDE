@@ -8,7 +8,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # JUCE Setup
-find_package(PkgConfig REQUIRED)
 
 # Download JUCE (recommended for self-contained builds)
 include(FetchContent)
@@ -22,6 +21,7 @@ FetchContent_MakeAvailable(JUCE)
 # Plugin Definition
 juce_add_plugin(LeslieRotaryVST
     COMPANY_NAME "Your Company"
+    BUNDLE_ID com.RadenM.LeslieRotaryVST
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
@@ -84,6 +84,17 @@ if(WIN32)
     target_compile_definitions(LeslieRotaryVST PRIVATE
         NOMINMAX=1
         WIN32_LEAN_AND_MEAN=1)
+    # After building the VST3 target, copy the full .vst3 bundle to the user's dev folder
+    # Note: $<TARGET_FILE_DIR:...> points to the binary inside Contents/x86_64-win.
+    # We copy the bundle root by going two directories up and copying the directory.
+    add_custom_command(TARGET LeslieRotaryVST_VST3 POST_BUILD
+        # Remove existing dev drop to avoid stale/locked files
+        COMMAND ${CMAKE_COMMAND} -E remove_directory "E:/Music Production/TheSampleBase/VST/64/Leslie Rotary.vst3"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "E:/Music Production/TheSampleBase/VST/64"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "$<TARGET_FILE_DIR:LeslieRotaryVST_VST3>/../.."
+            "E:/Music Production/TheSampleBase/VST/64/Leslie Rotary.vst3"
+    )
 elseif(APPLE)
     set_target_properties(LeslieRotaryVST PROPERTIES
         XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
