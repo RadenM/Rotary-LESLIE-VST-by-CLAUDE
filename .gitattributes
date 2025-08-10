@@ -1,0 +1,23 @@
+# Normalize text to LF in repo; Windows will handle CRLF on checkout
+* text=auto eol=lf
+
+# C/C++
+*.h   text eol=lf
+*.hpp text eol=lf
+*.c   text eol=lf
+*.cpp text eol=lf
+*.inl text eol=lf
+
+# CMake
+CMakeLists.txt text eol=lf
+*.cmake text eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.wav binary
+
+# Build outputs
+Builds/** binary
